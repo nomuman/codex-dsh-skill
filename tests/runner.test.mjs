@@ -13,11 +13,39 @@ const parser = `export function parseCredentialsDocument(text) {
   if (document.version !== 1 || !document.refs || typeof document.refs !== 'object') throw new Error('SECRET_MARKER invalid store');
   return { refs: new Map(Object.entries(document.refs)) };
 }`;
+const faultPreload = `if (process.argv[1]?.endsWith('/dsh-delegate/scripts/run.mjs')) {
+  const fault = process.env.TEST_FAULT;
+  if (fault === 'post-snapshot') {
+    const childProcess = require('node:child_process');
+    const original = childProcess.execFileSync;
+    let statuses = 0;
+    childProcess.execFileSync = (command, args, options) => {
+      if (command === 'git' && args.includes('status') && ++statuses === 2) {
+        throw Object.assign(new Error('private fault marker'), { code: 'EIO' });
+      }
+      return original(command, args, options);
+    };
+    require('node:module').syncBuiltinESMExports();
+  }
+  if (fault?.startsWith('kill-')) {
+    const original = process.kill;
+    const signal = { 'kill-probe': 0, 'kill-term': 'SIGTERM', 'kill-kill': 'SIGKILL', 'kill-esrch': 0 }[fault];
+    let injected = false;
+    process.kill = (pid, requested) => {
+      if (pid < 0 && requested === signal && !injected) {
+        injected = true;
+        throw Object.assign(new Error('private fault marker'), { code: fault === 'kill-esrch' ? 'ESRCH' : 'EPERM' });
+      }
+      return original(pid, requested);
+    };
+  }
+}`;
 const fake = `#!${process.execPath}
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 const mode = process.env.FAKE_MODE;
+writeFileSync(join(process.env.DSH_HOME, 'fake.pid'), String(process.pid));
 appendFileSync(join(process.env.DSH_HOME, 'invocations.log'), 'invoked\\n');
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
@@ -112,13 +140,15 @@ function fixture(t) {
   git(repo, 'add', '.gitignore');
   git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture');
   const bin = join(root, 'fake-dsh.mjs'); writeFileSync(bin, fake); chmodSync(bin, 0o700);
+  const preload = join(root, 'fault-preload.cjs'); writeFileSync(preload, faultPreload);
   const packagePath = join(root, 'node_modules', '@deepseek-ai', 'dsh-credentials-local');
   mkdirSync(packagePath, { recursive: true });
   writeFileSync(join(packagePath, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-credentials-local', type: 'module', exports: './index.mjs' }));
   writeFileSync(join(packagePath, 'index.mjs'), parser);
   const task = join(root, 'task.txt'); writeFileSync(task, 'Change result.txt. $(touch INJECTED) ; echo literal');
-  return { root, repo, home, artifacts, bin, task, packagePath };
+  return { root, repo, home, artifacts, bin, task, packagePath, preload };
 }
+function faultEnv(f, kind) { return { NODE_OPTIONS: `--require=${f.preload}`, TEST_FAULT: kind }; }
 function run(f, mode = 'success', extra = [], env = {}, supervisorMs = 12000) {
   const bounds = extra.includes('--timeout-seconds') ? [] : ['--timeout-seconds', '6'];
   const processEnv = { ...process.env };
@@ -421,6 +451,7 @@ test('preserves max-tokens turn reason without reporting completion', async t =>
 test('ordinary Git status and allowed edits preserve semantic index integrity', async t => {
   const result = await run(fixture(t), 'git-status').done;
   assert.equal(result.code, 0); assert.equal(result.summary.integrityFailure, false);
+  assert.deepEqual(result.summary.integrityReasons, []);
 });
 
 test('decodes multibyte UTF-8 across chunks', async t => {
@@ -487,21 +518,57 @@ for (const mode of ['stage', 'commit']) {
   test(`records unexpected ${mode} as integrity failure without rollback`, async t => {
     const f = fixture(t); const result = await run(f, mode).done;
     assert.equal(result.summary.category, 'integrity'); assert.equal(result.code, 1);
+    assert.deepEqual(result.summary.integrityReasons, mode === 'stage' ? ['index_changed', 'staged_changes'] : ['head_changed', 'index_changed']);
     assert.equal(readFileSync(join(f.repo, 'result.txt'), 'utf8'), 'changed');
   });
 }
 
-test('bounds total stdout and stderr bytes and stops oversized lines', async t => {
-  for (const [mode, args, expected, bound] of [
-    ['flood', ['--max-log-bytes', '1024'], 'output_limit', 1024],
-    ['stderr-flood', ['--max-log-bytes', '1024'], 'output_limit', 1024],
-    ['line', [], 'line_limit', 8388608],
-  ]) {
+for (const [mode, args, expected, bound] of [
+  ['flood', ['--max-log-bytes', '1024'], 'output_limit', 1024],
+  ['stderr-flood', ['--max-log-bytes', '1024'], 'output_limit', 1024],
+  ['line', [], 'line_limit', 8388608],
+]) {
+  test(`bounds output for ${mode}`, async t => {
     const result = await run(fixture(t), mode, args).done;
     assert.equal(result.summary.category, expected); assert.equal(result.code, 1);
+    assert.deepEqual(result.summary.integrityReasons, []);
     const directory = dirname(result.summary.summaryPath);
     assert.ok(statSync(join(directory, 'events.jsonl')).size + statSync(join(directory, 'stderr.log')).size <= bound);
-  }
+  });
+}
+
+test('reports post-run Git evidence failure without exposing the underlying error', async t => {
+  const f = fixture(t);
+  const result = await run(f, 'success', [], faultEnv(f, 'post-snapshot')).done;
+  assert.equal(result.summary.category, 'integrity');
+  assert.deepEqual(result.summary.integrityReasons, ['post_run_evidence_failed']);
+  assert.equal(result.summary.integrityFailure, true);
+  assert.doesNotMatch(JSON.stringify(result.summary), /private fault marker/);
+});
+
+for (const [fault, mode, reason] of [
+  ['kill-probe', 'success', 'group_probe_failed'],
+  ['kill-term', 'flood', 'group_sigterm_failed'],
+  ['kill-kill', 'flood', 'group_sigkill_failed'],
+]) {
+  test(`reports ${fault} and reaps the fake child`, async t => {
+    const f = fixture(t);
+    const result = await run(f, mode, mode === 'flood' ? ['--max-log-bytes', '1024'] : [], faultEnv(f, fault)).done;
+    assert.equal(result.summary.category, 'integrity');
+    assert.deepEqual(result.summary.integrityReasons, [reason]);
+    assert.equal(result.summary.integrityFailure, true);
+    assert.doesNotMatch(JSON.stringify(result.summary), /private fault marker/);
+    const pid = Number(readFileSync(join(f.home, 'fake.pid'), 'utf8'));
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  });
+}
+
+test('ignores ESRCH when the process group has exited', async t => {
+  const f = fixture(t);
+  const result = await run(f, 'success', [], faultEnv(f, 'kill-esrch')).done;
+  assert.equal(result.code, 0);
+  assert.equal(result.summary.category, null);
+  assert.deepEqual(result.summary.integrityReasons, []);
 });
 
 for (const mode of ['success-orphan', 'success-orphan-pipes']) {
