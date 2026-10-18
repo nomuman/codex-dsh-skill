@@ -10,6 +10,7 @@ const usage = `Usage: DSH_BIN=/absolute/dsh DSH_HOME=/absolute/existing-state no
   --repo /absolute/clean-git-root --task-file /absolute/private/task.txt
   [--timeout-seconds 900] [--max-log-bytes 8388608] [--max-tokens 8192]
   [--artifacts-dir /absolute/existing-parent]
+  [-h | --help]
 Node 22+, macOS/Linux. One invocation, no automatic retries. Limits are not cost caps.`;
 let activeResult;
 
@@ -72,7 +73,7 @@ ${disabled.map(id => `- id: ${id}\n  disabled: true\n`).join('')}`;
 }
 
 async function main() {
-  if (process.argv.includes('--help')) { console.log(usage); return; }
+  if (process.argv.includes('--help') || process.argv.includes('-h')) { console.log(usage); return; }
   const options = { '--timeout-seconds': '900', '--max-log-bytes': '8388608', '--max-tokens': '8192' };
   const allowed = new Set(['--repo', '--task-file', '--artifacts-dir', ...Object.keys(options)]);
   const supplied = new Set();
