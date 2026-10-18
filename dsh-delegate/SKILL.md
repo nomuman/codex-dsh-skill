@@ -17,7 +17,7 @@ Use only the network access and execution permissions provided by the current se
 
 Before execution, read `~/.config/codex-dsh-skill/local-setup.md` if it exists. This optional machine-local note contains paths and an optional route preference, not credentials or executable shell code. Prefer explicit paths supplied for the current task, then the caller's `DSH_BIN` and `DSH_HOME`, then the note. Ask only for missing paths. Read [setup.md](references/setup.md) for first use or changed configuration. Verify that both paths are existing absolute paths and pass them explicitly on every invocation. Let DSH resolve the selected credential reference from its saved store or environment without reading or rewriting secret values.
 
-Select the route from the current user request, then a stored route preference. If neither establishes a choice, ask once before invoking DSH. A free request always selects `opencode-free`. Pass `--route` explicitly on every new invocation. The CLI retains `opencode-go` as its default for existing callers. An unavailable free credential or model ends the run; never switch to Go automatically. The free offering is limited-time, with no unlimited-use or future-price guarantee.
+Select the route from the current user request, then a stored route preference. A free request selects `opencode-free`, and a Go request selects `opencode-go`. Pass that explicit route when selected. Otherwise omit `--route` so the runner uses `auto`. Auto selects Go when its dedicated credential reference is configured in DSH's saved store or effective environment; otherwise it selects free. A configured reference does not prove an active contract. A failed selected run ends without changing routes. The free offering is limited-time, with no unlimited-use or future-price guarantee.
 
 ## Run once
 
@@ -28,11 +28,10 @@ DSH_BIN="/configured/dsh" DSH_HOME="/configured/state" \
   node "<skill-directory>/scripts/run.mjs" \
   --repo "/clean/worktree" \
   --task-file "/private/task.txt" \
-  --route opencode-free \
   --timeout-seconds 900
 ```
 
-Use `--route opencode-go` when Go is selected. See the setup table for each route's credential reference.
+Add `--route opencode-free` or `--route opencode-go` when the request or saved preference selects one. See the setup table for each route's credential reference.
 
 The runner sends the task through stdin and writes private artifacts outside the repository and DSH home. It invokes DSH once, with provider retries disabled. It does not resume sessions or automatically reassign a failed task. Time, output, and per-request token limits are operational limits, not monetary caps. DSH can make multiple model requests during one turn.
 
