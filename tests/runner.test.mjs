@@ -119,7 +119,7 @@ function fixture(t) {
   const task = join(root, 'task.txt'); writeFileSync(task, 'Change result.txt. $(touch INJECTED) ; echo literal');
   return { root, repo, home, artifacts, bin, task, packagePath };
 }
-function run(f, mode = 'success', extra = [], env = {}) {
+function run(f, mode = 'success', extra = [], env = {}, supervisorMs = 12000) {
   const bounds = extra.includes('--timeout-seconds') ? [] : ['--timeout-seconds', '6'];
   const processEnv = { ...process.env };
   delete processEnv.OPENCODE_GO_API_KEY;
@@ -132,7 +132,7 @@ function run(f, mode = 'success', extra = [], env = {}) {
     const supervisor = setTimeout(() => {
       child.kill('SIGKILL');
       reject(new Error('Runner exceeded the test supervisor deadline'));
-    }, 12000);
+    }, supervisorMs);
     child.stdout.on('data', value => { stdout += value; });
     child.stderr.on('data', value => { stderr += value; });
     child.on('error', error => { clearTimeout(supervisor); reject(error); });
@@ -144,6 +144,28 @@ function run(f, mode = 'success', extra = [], env = {}) {
   });
   return { child, done };
 }
+for (const [name, path, route] of [
+  ['task file', f => f.task, 'opencode-free'],
+  ['credential store', f => join(f.home, '.credentials.yaml'), 'auto'],
+  ['project dotenv', f => join(f.repo, '.env'), 'auto'],
+  ['state dotenv', f => join(f.home, '.env'), 'auto'],
+]) {
+  test(`rejects a FIFO ${name} before DSH or artifacts`, async t => {
+    const f = fixture(t);
+    const input = path(f);
+    if (name === 'task file') rmSync(input);
+    execFileSync('mkfifo', [input]);
+    let result;
+    await assert.doesNotReject(async () => {
+      result = await run(f, 'success', ['--route', route, '--timeout-seconds', '1'], {}, 3000).done;
+    }, 'FIFO preflight must finish before the test supervisor deadline');
+    assert.equal(result.code, 1);
+    assert.equal(result.summary.category, 'preflight_or_runner_error');
+    assert.equal(existsSync(join(f.home, 'invocations.log')), false);
+    assert.deepEqual(readdirSync(f.artifacts), []);
+  });
+}
+
 async function waitFor(path) {
   for (let i = 0; i < 400; i++) {
     if (existsSync(path)) return;

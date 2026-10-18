@@ -98,7 +98,7 @@ async function resolveRoute(requested, bin, home, repo, env) {
     const credentialsPath = join(home, '.credentials.yaml');
     let credentials;
     try {
-      const fd = openSync(credentialsPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const fd = openSync(credentialsPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const metadata = fstatSync(fd);
         if (!metadata.isFile() || metadata.uid !== process.getuid() || (metadata.mode & 0o077) !== 0) throw new Error('Unsafe credential file');
@@ -116,7 +116,7 @@ async function resolveRoute(requested, bin, home, repo, env) {
     if (env.OPENCODE_GO_API_KEY) return 'opencode-go';
     const dotenv = path => {
       let fd;
-      try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+      try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
       catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
       try {
         if (!fstatSync(fd).isFile()) throw new Error('Invalid dotenv file');
@@ -164,7 +164,7 @@ async function main() {
   if (before.status || before.staged) reject('Repository must have no tracked, staged, or untracked changes');
   const taskPath = existing(options['--task-file'], '--task-file');
   if (inside(taskPath, repo)) reject('Keep the task file outside the repository');
-  const taskFd = openSync(taskPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const taskFd = openSync(taskPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let task;
   try {
     const metadata = fstatSync(taskFd);
