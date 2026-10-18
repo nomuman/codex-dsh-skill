@@ -119,6 +119,30 @@ async function waitFor(path) {
   assert.fail('Fixture process did not become ready');
 }
 
+test('prints the same help and exits 0 for -h and --help without configuration', async () => {
+  const env = { ...process.env };
+  delete env.DSH_BIN; delete env.DSH_HOME;
+  const help = async alias => {
+    const child = spawn(process.execPath, [runner, alias], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = ''; let stderr = '';
+    child.stdout.on('data', value => { stdout += value; });
+    child.stderr.on('data', value => { stderr += value; });
+    const code = await new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+    return { code, stdout, stderr };
+  };
+  const short = await help('-h'); const long = await help('--help');
+  for (const result of [short, long]) {
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /^Usage:/);
+    assert.match(result.stdout, /-h \| --help/);
+    assert.equal(result.stderr, '');
+  }
+  assert.equal(short.stdout, long.stdout);
+});
+
 test('one process receives stdin literally, preserves credentials, and produces private review evidence', async t => {
   const f = fixture(t); const credentials = join(f.home, '.credentials.yaml');
   writeFileSync(credentials, 'test credential fixture', { mode: 0o600 });
