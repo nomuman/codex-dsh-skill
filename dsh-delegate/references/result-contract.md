@@ -12,7 +12,7 @@ Each run has a unique directory with mode 0700. Its `evidence/` directory also h
 | `events.jsonl`, `stderr.log` | Bounded raw process output |
 | `answer.txt` | Final DSH answer, when present |
 
-The initial summary is `incomplete`. If the runner is forcibly killed or the host crashes, inspect this record and check process liveness before starting anything else. A local termination request sends SIGTERM to the process group, then SIGKILL after 1.5 seconds. Escalation remains active even if the group leader exits first. A task can already have changed files before termination.
+The initial summary is `incomplete`. If the runner is forcibly killed or the host crashes, inspect this record and check process liveness before starting anything else. A local termination request sends SIGTERM to the process group, then SIGKILL after 1.5 seconds. Escalation remains active even if the group leader exits first. After a normal leader exit, the runner also terminates any remaining group members before capturing `after.json`. This cleanup does not change a successful completion into cancellation. A task can already have changed files before termination.
 
 `outcome: completed` requires exit 0, one session for the requested cwd, a last `turn_end` reason of `completed`, and a following final event. Later terminal inconsistencies, error events, invalid JSON, a local stop, or Git integrity changes reject completion. The runner accepts split UTF-8 chunks and a final line without a trailing newline. Unknown event types are retained without treating them as successful completion.
 
@@ -25,7 +25,7 @@ The initial summary is `incomplete`. If the runner is forcibly killed or the hos
 | `transport` | DNS, connection, or transport failure. Check host network permissions and connectivity. |
 | `unknown` | No recognized provider cause or incomplete protocol evidence. Read private logs without guessing. |
 | `protocol` | Malformed events or inconsistent session and terminal ordering. Check DSH compatibility. |
-| `integrity` | HEAD or index changed, staged changes appeared, or post-run Git evidence failed. Inspect without rollback. |
+| `integrity` | HEAD or tracked index entries changed, staged changes appeared, or post-run Git evidence failed. Inspect without rollback. |
 | `timeout`, `output_limit`, `line_limit` | Local execution or output bound stopped the process group. Review partial work. |
 | `cancelled_sigint`, `cancelled_sigterm` | The caller requested cancellation. Review partial work. |
 | `spawn_error`, `runner_io_error`, `runner_error` | Process startup or local runner operation failed. Inspect the local environment. |

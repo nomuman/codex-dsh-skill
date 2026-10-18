@@ -39,7 +39,7 @@ function privateFile(path, value, exclusive = true) {
 }
 function classify(text) {
   if (/api_key_expired/i.test(text)) return 'api_key_expired';
-  if (/\b401\b|unauthorized|invalid[_ -]?api[_ -]?key|authentication/i.test(text)) return 'authentication';
+  if (/"code"\s*:\s*"(?:AUTH|INVALID_CREDENTIAL|MISSING_CREDENTIAL)"/.test(text) || /\b401\b|unauthorized|invalid[_ -]?api[_ -]?key|authentication/i.test(text)) return 'authentication';
   if (/quota|insufficient[_ -]?(credit|balance)|usage[_ -]?limit|subscription[_ -]?limit/i.test(text)) return 'quota';
   if (/\b429\b|rate[_ -]?limit|too many requests/i.test(text)) return 'rate_limit';
   if (/ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|TRANSPORT|connection error|fetch failed|network error/i.test(text)) return 'transport';
@@ -148,20 +148,28 @@ Follow repository instructions. Stop and report when blocked instead of retrying
     cwd: repo, env: { ...process.env, DSH_HOME: home }, detached: true, stdio: ['pipe', 'pipe', 'pipe'],
   });
   console.error('dsh-delegate: started');
-  let escalation;
   let stopWait;
   const killGroup = signal => {
     if (!child.pid) return;
     try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') result.integrityFailure = true; }
   };
+  const groupExists = () => {
+    if (!child.pid) return false;
+    try { process.kill(-child.pid, 0); return true; }
+    catch (error) {
+      if (error.code === 'ESRCH') return false;
+      result.integrityFailure = true;
+      return true;
+    }
+  };
+  const terminateGroup = () => {
+    killGroup('SIGTERM');
+    return new Promise(done => setTimeout(() => { killGroup('SIGKILL'); done(); }, 1500));
+  };
   const stop = reason => {
     if (result.stopReason) return;
     result.stopReason = reason;
-    killGroup('SIGTERM');
-    stopWait = new Promise(done => {
-      // The group may outlive its leader, so keep escalation after the leader exits.
-      escalation = setTimeout(() => { killGroup('SIGKILL'); done(); }, 1500);
-    });
+    stopWait ||= terminateGroup();
   };
   const cancel = signal => stop(signal === 'SIGINT' ? 'cancelled_sigint' : 'cancelled_sigterm');
   const onInt = () => cancel('SIGINT');
@@ -188,7 +196,7 @@ Follow repository instructions. Stop and report when blocked instead of retrying
     if (value.type === 'error' || (value.type === 'status' && value.phase === 'error')) eventErrors += JSON.stringify(value).slice(0, 16384);
     if (value.type === 'status' && value.phase === 'turn_start') turnEnded = false;
     if (value.type === 'status' && value.phase === 'turn_end') {
-      result.lastTurnReason = typeof value.reason?.kind === 'string' && /^[a-z_]{1,64}$/.test(value.reason.kind) ? value.reason.kind : null;
+      result.lastTurnReason = typeof value.reason?.kind === 'string' && /^[a-z_-]{1,64}$/.test(value.reason.kind) ? value.reason.kind : null;
       if (value.reason?.error) eventErrors += JSON.stringify(value.reason.error).slice(0, 16384);
       turnEnded = true; lastEndIndex = eventIndex;
     }
@@ -219,12 +227,16 @@ Follow repository instructions. Stop and report when blocked instead of retrying
   child.stdin.on('error', () => {});
   child.stdin.end(prompt);
   child.on('error', () => { result.category = 'spawn_error'; });
+  child.once('exit', () => {
+    clearTimeout(timer);
+    if (!stopWait && groupExists()) stopWait = terminateGroup();
+  });
   await new Promise(done => child.on('close', (code, signal) => { result.exitCode = code; result.signal = signal; done(); }));
   clearTimeout(timer);
   line += decoder.end();
   if (line) event(line);
+  if (!stopWait && groupExists()) stopWait = terminateGroup();
   if (stopWait) await stopWait;
-  clearTimeout(escalation);
   process.off('SIGINT', onInt); process.off('SIGTERM', onTerm);
   closeSync(stdoutFd); closeSync(stderrFd);
   privateFile(files['answer.txt'], finalText);
