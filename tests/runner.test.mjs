@@ -35,6 +35,14 @@ if (mode === 'hang' || mode === 'orphan') {
 } else if (mode === 'invalid') {
   process.stdout.write('private invalid JSON\\n');
   setInterval(() => {}, 1000);
+} else if (mode.startsWith('success-orphan')) {
+  const child = spawn(process.execPath, ['-e', "const fs=require('node:fs'); process.on('SIGTERM',()=>fs.writeFileSync('cleanup.txt','TERM received')); fs.writeFileSync(process.argv[1],String(process.pid)); setTimeout(()=>fs.writeFileSync('result.txt','late mutation'),2300); process.send('ready'); process.disconnect(); setInterval(()=>{},1000)", join(process.env.DSH_HOME, 'child.pid')], { stdio: ['ignore', mode.endsWith('-pipes') ? 'inherit' : 'ignore', mode.endsWith('-pipes') ? 'inherit' : 'ignore', 'ipc'] });
+  await new Promise(resolve => child.once('message', resolve));
+  child.unref();
+  session(); end('completed'); final();
+} else if (mode.startsWith('code:')) {
+  emit({ type: 'error', error: { code: mode.slice(5) } });
+  process.exitCode = 1;
 } else if (mode === 'before-session-error') {
   emit({ type: 'error', error: { code: 'ENOTFOUND' } });
 } else {
@@ -48,7 +56,8 @@ if (mode === 'hang' || mode === 'orphan') {
     emit({ type: 'error', error: mode.slice(6) });
     process.stderr.write('sensitive stderr ' + mode.slice(6));
     end('error'); final(); process.exitCode = 1;
-  } else if (mode === 'false-final') { end('aborted'); final(); }
+  } else if (mode === 'max-tokens') { end('max-tokens'); final(); }
+  else if (mode === 'false-final') { end('aborted'); final(); }
   else if (mode === 'missing-final') { end('completed'); }
   else if (mode === 'final-first') { final(); end('completed'); }
   else if (mode === 'later-error') { end('completed'); end('error'); final(); }
@@ -103,7 +112,7 @@ function run(f, mode = 'success', extra = [], env = {}) {
   return { child, done };
 }
 async function waitFor(path) {
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 400; i++) {
     if (existsSync(path)) return;
     await new Promise(resolve => setTimeout(resolve, 25));
   }
@@ -145,6 +154,21 @@ test('classifies errors reported in turn reasons or before session initializatio
     const result = await run(fixture(t), mode).done;
     assert.equal(result.code, 1); assert.equal(result.summary.category, category);
   }
+});
+
+for (const code of ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL', 'AUTH_OTHER', 'MISSING_CREDENTIALS']) {
+  test(`classifies code-only ${code} without stderr`, async t => {
+    const result = await run(fixture(t), `code:${code}`).done;
+    assert.equal(result.code, 1);
+    assert.equal(result.summary.category, ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'].includes(code) ? 'authentication' : 'unknown');
+    assert.equal(readFileSync(join(dirname(result.summary.summaryPath), 'stderr.log'), 'utf8'), '');
+  });
+}
+
+test('preserves max-tokens turn reason without reporting completion', async t => {
+  const result = await run(fixture(t), 'max-tokens').done;
+  assert.equal(result.code, 1); assert.equal(result.summary.outcome, 'failed');
+  assert.equal(result.summary.lastTurnReason, 'max-tokens');
 });
 
 test('ordinary Git status and allowed edits preserve semantic index integrity', async t => {
@@ -233,6 +257,31 @@ test('bounds total stdout and stderr bytes and stops oversized lines', async t =
   }
 });
 
+for (const mode of ['success-orphan', 'success-orphan-pipes']) {
+  test(`successful leader exit cleans ${mode} before the after snapshot`, async t => {
+    const f = fixture(t);
+    let pid;
+    t.after(() => {
+      if (!pid) return;
+      try { process.kill(pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    });
+    const result = await run(f, mode).done;
+    pid = Number(readFileSync(join(f.home, 'child.pid'), 'utf8'));
+    assert.equal(result.code, 0); assert.equal(result.summary.outcome, 'completed');
+    assert.equal(result.summary.stopReason, null);
+    let alive = true;
+    for (let i = 0; i < 80; i++) {
+      try { process.kill(pid, 0); } catch (error) { assert.equal(error.code, 'ESRCH'); alive = false; break; }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.equal(alive, false, 'Descendant must not survive successful runner completion');
+    const after = JSON.parse(readFileSync(join(dirname(result.summary.summaryPath), 'after.json'), 'utf8'));
+    assert.ok(after.status.includes('cleanup.txt'), 'Snapshot must include cleanup activity before completion');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    assert.equal(readFileSync(join(f.repo, 'result.txt'), 'utf8'), 'original', 'No delayed mutation after the summary');
+  });
+}
+
 test('timeout kills a TERM-resistant descendant after its leader exits', async t => {
   const f = fixture(t); const result = await run(f, 'orphan', ['--timeout-seconds', '1']).done;
   assert.equal(result.summary.category, 'timeout'); assert.equal(result.code, 1);
@@ -248,10 +297,15 @@ test('timeout kills a TERM-resistant descendant after its leader exits', async t
 for (const signal of ['SIGINT', 'SIGTERM']) {
   test(`handles ${signal} with a saved cancellation outcome`, async t => {
     const f = fixture(t); const invocation = run(f, 'hang');
-    await waitFor(join(f.home, 'ready'));
-    invocation.child.kill(signal);
-    const result = await invocation.done;
-    assert.equal(result.code, 1); assert.equal(result.summary.category, `cancelled_${signal.toLowerCase()}`);
-    assert.equal(JSON.parse(readFileSync(result.summary.summaryPath)).category, result.summary.category);
+    try {
+      await waitFor(join(f.home, 'ready'));
+      invocation.child.kill(signal);
+      const result = await invocation.done;
+      assert.equal(result.code, 1); assert.equal(result.summary.category, `cancelled_${signal.toLowerCase()}`);
+      assert.equal(JSON.parse(readFileSync(result.summary.summaryPath)).category, result.summary.category);
+    } finally {
+      if (invocation.child.exitCode === null && invocation.child.signalCode === null) invocation.child.kill('SIGTERM');
+      await invocation.done;
+    }
   });
 }
