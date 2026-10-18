@@ -8,10 +8,11 @@ import { fileURLToPath } from 'node:url';
 
 const runner = resolve(dirname(fileURLToPath(import.meta.url)), '../dsh-delegate/scripts/run.mjs');
 const fake = `#!${process.execPath}
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 const mode = process.env.FAKE_MODE;
+appendFileSync(join(process.env.DSH_HOME, 'invocations.log'), 'invoked\\n');
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 writeFileSync(join(process.env.DSH_HOME, 'invocation.json'), JSON.stringify({ args: process.argv.slice(2), input }));
@@ -181,6 +182,89 @@ test('one process receives stdin literally, preserves credentials, and produces 
   assert.ok(!stdout.includes('private answer') && !stderr.includes('private answer'));
   const patch = readFileSync(join(evidence, 'patch.yml'), 'utf8');
   assert.match(patch, /opencode-go:/); assert.match(patch, /maxRetries: 0/); assert.match(patch, /maxTokens: 8192/);
+});
+
+test('default route and explicit Go produce the same configuration', async t => {
+  const legacy = await run(fixture(t)).done;
+  const explicit = await run(fixture(t), 'success', ['--route', 'opencode-go']).done;
+  for (const result of [legacy, explicit]) {
+    assert.equal(result.code, 0);
+    assert.equal(result.summary.route, 'opencode-go');
+    assert.equal(result.summary.provider, 'opencode-go');
+    assert.equal(result.summary.model, 'deepseek-v4.1-flash');
+  }
+  const configuration = result => readFileSync(join(dirname(result.summary.summaryPath), 'patch.yml'), 'utf8');
+  assert.equal(configuration(legacy), configuration(explicit));
+  assert.match(configuration(legacy), /apiKeyEnv: OPENCODE_GO_API_KEY\n/);
+  assert.match(configuration(legacy), /baseURL: https:\/\/opencode.ai\/inference\/go\/openai\/v1\n/);
+});
+
+test('free route selects only the native free model and preserves execution bounds', async t => {
+  const f = fixture(t);
+  const { code, summary } = await run(f, 'success', ['--route', 'opencode-free', '--max-tokens', '4096']).done;
+  assert.equal(code, 0);
+  assert.equal(summary.route, 'opencode-free');
+  assert.equal(summary.provider, 'opencode');
+  assert.equal(summary.model, 'deepseek-v4.1-flash-free');
+  const patchPath = join(dirname(summary.summaryPath), 'patch.yml');
+  const invocation = JSON.parse(readFileSync(join(f.home, 'invocation.json'), 'utf8'));
+  assert.equal(invocation.args[invocation.args.indexOf('--patch') + 1], patchPath);
+  const patch = readFileSync(patchPath, 'utf8');
+  assert.match(patch, /providers:\n      opencode:\n/);
+  assert.match(patch, /apiKeyEnv: OPENCODE_API_KEY\n/);
+  assert.match(patch, /baseURL: https:\/\/opencode.ai\/inference\/openai\/v1\n/);
+  assert.match(patch, /models:\n          - id: deepseek-v4\.1-flash-free\n            maxTokens: 4096\n/);
+  assert.match(patch, /provider: opencode\n    model: deepseek-v4\.1-flash-free\n    reasoningEffort: high\n/);
+  assert.match(patch, /reasoning: high\n/);
+  assert.match(patch, /maxRetries: 0\n/);
+  assert.doesNotMatch(patch, /opencode-go|OPENCODE_GO_API_KEY|inference\/go\//);
+  assert.doesNotMatch(patch, /(?:id|model): deepseek-v4\.1-flash\n/);
+  const go = await run(fixture(t)).done;
+  const helpers = configuration => configuration.slice(configuration.indexOf('- id: session-title-llm'));
+  assert.equal(helpers(patch), helpers(readFileSync(join(dirname(go.summary.summaryPath), 'patch.yml'), 'utf8')));
+});
+
+for (const args of [
+  ['--route', 'unknown'], ['--route', '__proto__'], ['--route', 'constructor'],
+  ['--route', 'opencode-free', '--route', 'opencode-go'],
+]) {
+  test(`rejects invalid route arguments ${args.join(' ')} before artifacts or DSH`, async t => {
+    const f = fixture(t); const result = await run(f, 'success', args).done;
+    assert.equal(result.code, 1);
+    assert.equal(result.summary.category, 'preflight_or_runner_error');
+    assert.equal(existsSync(join(f.home, 'invocations.log')), false);
+    assert.deepEqual(readdirSync(f.artifacts), []);
+  });
+}
+
+for (const [mode, category] of [
+  ['code:AUTH', 'authentication'], ['code:MISSING_CREDENTIAL', 'authentication'],
+  ['error:429 quota exhausted', 'quota'], ['error:429 too many requests', 'rate_limit'],
+  ['error:TRANSPORT ENOTFOUND', 'transport'], ['error:model unavailable', 'unknown'],
+]) {
+  test(`free route stops once for ${mode} without fallback`, async t => {
+    const f = fixture(t);
+    const result = await run(f, mode, ['--route', 'opencode-free']).done;
+    assert.equal(result.code, 1); assert.equal(result.summary.outcome, 'failed');
+    assert.equal(result.summary.category, category);
+    assert.equal(result.summary.route, 'opencode-free');
+    assert.equal(result.summary.provider, 'opencode');
+    assert.equal(result.summary.model, 'deepseek-v4.1-flash-free');
+    assert.equal(readFileSync(join(f.home, 'invocations.log'), 'utf8'), 'invoked\n');
+    assert.equal(readdirSync(f.artifacts).length, 1);
+    const patch = readFileSync(join(dirname(result.summary.summaryPath), 'patch.yml'), 'utf8');
+    assert.doesNotMatch(patch, /opencode-go|OPENCODE_GO_API_KEY|(?:id|model): deepseek-v4\.1-flash\n/);
+  });
+}
+
+test('free route preserves timeout and Git integrity failures', async t => {
+  for (const [mode, category, args] of [['hang', 'timeout', ['--timeout-seconds', '1']], ['stage', 'integrity', []]]) {
+    const f = fixture(t);
+    const result = await run(f, mode, ['--route', 'opencode-free', ...args]).done;
+    assert.equal(result.code, 1); assert.equal(result.summary.category, category);
+    assert.equal(result.summary.route, 'opencode-free');
+    assert.equal(readFileSync(join(f.home, 'invocations.log'), 'utf8'), 'invoked\n');
+  }
 });
 
 for (const mode of ['false-final', 'missing-final', 'final-first', 'later-error', 'later-start', 'invalid', 'zero-error']) {

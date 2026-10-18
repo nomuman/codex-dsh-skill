@@ -8,11 +8,24 @@ import { StringDecoder } from 'node:string_decoder';
 
 const usage = `Usage: DSH_BIN=/absolute/dsh DSH_HOME=/absolute/existing-state node run.mjs
   --repo /absolute/clean-git-root --task-file /absolute/private/task.txt
+  [--route opencode-go|opencode-free] (default: opencode-go)
   [--timeout-seconds 900] [--max-log-bytes 8388608] [--max-tokens 8192]
   [--artifacts-dir /absolute/existing-parent]
   [-h | --help]
 Node 22+, macOS/Linux. One invocation, no automatic retries. Limits are not cost caps.`;
 let activeResult;
+const routes = {
+  'opencode-go': {
+    provider: 'opencode-go', model: 'deepseek-v4.1-flash',
+    displayName: 'OpenCode Go (subscription)', apiKeyEnv: 'OPENCODE_GO_API_KEY',
+    baseURL: 'https://opencode.ai/inference/go/openai/v1',
+  },
+  'opencode-free': {
+    provider: 'opencode', model: 'deepseek-v4.1-flash-free',
+    displayName: 'OpenCode (limited-time free)', apiKeyEnv: 'OPENCODE_API_KEY',
+    baseURL: 'https://opencode.ai/inference/openai/v1',
+  },
+};
 
 function reject(message) { const error = new Error(message); error.safeMessage = message; throw error; }
 function inside(path, root) {
@@ -46,35 +59,35 @@ function classify(text) {
   if (/ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|TRANSPORT|connection error|fetch failed|network error/i.test(text)) return 'transport';
   return 'unknown';
 }
-function patch(maxTokens) {
+function patch(route, maxTokens) {
   const disabled = ['session-title-llm', 'compaction-basic', 'command-compact', 'image-offload', 'tool-subagent', 'tool-subagent-fork', 'tool-subagent-control', 'tool-subagent-list-agents', 'tool-workflow', 'workflow-ptc', 'subagent-spawn-in-process', 'subagent-fork-in-process', 'goal-round-driver', 'command-goal', 'tool-goal'];
   return `- id: credentials
   disabled: false
 - id: llm-pi-ai
   config:
     providers:
-      opencode-go:
-        displayName: OpenCode Go (subscription)
-        apiKeyEnv: OPENCODE_GO_API_KEY
-        baseURL: https://opencode.ai/inference/go/openai/v1
+      ${route.provider}:
+        displayName: ${route.displayName}
+        apiKeyEnv: ${route.apiKeyEnv}
+        baseURL: ${route.baseURL}
         reasoning: high
         retryPolicy:
           mode: normal
           maxRetries: 0
         models:
-          - id: deepseek-v4.1-flash
+          - id: ${route.model}
             maxTokens: ${maxTokens}
 - id: agent-default-model
   config:
-    provider: opencode-go
-    model: deepseek-v4.1-flash
+    provider: ${route.provider}
+    model: ${route.model}
     reasoningEffort: high
 ${disabled.map(id => `- id: ${id}\n  disabled: true\n`).join('')}`;
 }
 
 async function main() {
   if (process.argv.includes('--help') || process.argv.includes('-h')) { console.log(usage); return; }
-  const options = { '--timeout-seconds': '900', '--max-log-bytes': '8388608', '--max-tokens': '8192' };
+  const options = { '--route': 'opencode-go', '--timeout-seconds': '900', '--max-log-bytes': '8388608', '--max-tokens': '8192' };
   const allowed = new Set(['--repo', '--task-file', '--artifacts-dir', ...Object.keys(options)]);
   const supplied = new Set();
   const args = process.argv.slice(2);
@@ -82,6 +95,8 @@ async function main() {
     if (!allowed.has(args[i]) || supplied.has(args[i]) || !args[i + 1]) reject('Invalid or duplicate option; use --help');
     supplied.add(args[i]); options[args[i]] = args[i + 1];
   }
+  if (!Object.hasOwn(routes, options['--route'])) reject('--route must be opencode-go or opencode-free');
+  const route = routes[options['--route']];
   const positive = key => {
     const value = Number(options[key]);
     if (!Number.isSafeInteger(value) || value <= 0 || value > 2147483) reject(`${key} must be an integer between 1 and 2147483`);
@@ -118,6 +133,7 @@ async function main() {
   const files = Object.fromEntries(['summary.json', 'before.json', 'after.json', 'prompt.txt', 'patch.yml', 'events.jsonl', 'stderr.log', 'answer.txt'].map(name => [name, join(runDir, 'evidence', name)]));
   const result = {
     outcome: 'incomplete', category: 'unknown', codexVerified: false,
+    route: options['--route'], provider: route.provider, model: route.model,
     runDir, summaryPath: files['summary.json'], exitCode: null, signal: null,
     sessionId: null, lastTurnReason: null, stopReason: null, outputBytes: 0,
     protocolError: false, integrityFailure: false,
@@ -131,7 +147,7 @@ Do not commit, push, deploy, change credentials, or change Git history. Report c
 Follow repository instructions. Stop and report when blocked instead of retrying provider requests.
 \nTask:\n${task}`;
   privateFile(files['prompt.txt'], prompt);
-  privateFile(files['patch.yml'], patch(maxTokens));
+  privateFile(files['patch.yml'], patch(route, maxTokens));
   const stdoutFd = openSync(files['events.jsonl'], 'wx', 0o600);
   const stderrFd = openSync(files['stderr.log'], 'wx', 0o600);
   let finalText = '';
