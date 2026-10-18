@@ -10,4 +10,5 @@ state/
 *.jsonl
 *.log
 .credentials*
+local-setup.md
 __pycache__/

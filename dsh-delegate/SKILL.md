@@ -15,7 +15,7 @@ Check the actual checkout and Git status. The runner requires a clean Git root w
 
 Use only the network access and execution permissions provided by the current session. If the host forbids the required access, report the limitation. A separate terminal or background process must not bypass that restriction.
 
-For first use or changed local configuration, read [setup.md](references/setup.md). Require explicit existing absolute `DSH_BIN` and `DSH_HOME` paths. Use the saved credentials in that home, without reading or rewriting credential values. The configured provider is the native `opencode-go`, with `deepseek-v4.1-flash` and high reasoning.
+Before execution, read `~/.config/codex-dsh-skill/local-setup.md` if it exists. This optional machine-local note contains paths, not credentials or executable shell code. Prefer explicit paths supplied for the current task, then the caller's `DSH_BIN` and `DSH_HOME`, then the note. Ask only for missing paths. Read [setup.md](references/setup.md) for first use or changed configuration. Verify that both paths are existing absolute paths and pass them explicitly on every invocation. Use the saved credentials in that home, without reading or rewriting credential values. The configured provider is the native `opencode-go`, with `deepseek-v4.1-flash` and high reasoning.
 
 ## Run once
 
@@ -33,7 +33,7 @@ The runner sends the task through stdin and writes private artifacts outside the
 
 Keep the execution in progress until the runner exits. Use the returned summary path to read the result. If execution times out or is cancelled, inspect any partial work before deciding the next action. Never infer failure means no files changed.
 
-For authentication, quota, rate, transport, protocol, or integrity failures, read [result-contract.md](references/result-contract.md). Diagnose the recorded cause before any new model request. Report an unknown cause as unknown. Host communication restrictions and an expired provider credential are separate failures.
+For authentication, quota, rate, transport, protocol, integrity, or `max_tokens` failures, read [result-contract.md](references/result-contract.md). A model output limit does not establish task completion. Diagnose the recorded cause and inspect partial work before any new model request. Report an unknown cause as unknown. Host communication restrictions and an expired provider credential are separate failures.
 
 ## Verify independently
 
