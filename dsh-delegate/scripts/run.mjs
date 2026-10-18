@@ -184,7 +184,7 @@ async function main() {
     requestedRoute: options['--route'], route: selectedRoute, provider: route.provider, model: route.model,
     runDir, summaryPath: files['summary.json'], exitCode: null, signal: null,
     sessionId: null, lastTurnReason: null, stopReason: null, outputBytes: 0,
-    protocolError: false, integrityFailure: false,
+    protocolError: false, integrityFailure: false, integrityReasons: [],
   };
   activeResult = result;
   const save = () => privateFile(files['summary.json'], JSON.stringify(result, null, 2) + '\n', false);
@@ -227,14 +227,17 @@ Follow repository instructions. Stop and report when blocked instead of retrying
   };
   const killGroup = signal => {
     if (!child.pid) return;
-    try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') result.integrityFailure = true; }
+    try { process.kill(-child.pid, signal); }
+    catch (error) {
+      if (error.code !== 'ESRCH') result.integrityReasons.push(signal === 'SIGTERM' ? 'group_sigterm_failed' : 'group_sigkill_failed');
+    }
   };
   const groupExists = () => {
     if (!child.pid) return false;
     try { process.kill(-child.pid, 0); return true; }
     catch (error) {
       if (error.code === 'ESRCH') return false;
-      result.integrityFailure = true;
+      result.integrityReasons.push('group_probe_failed');
       return true;
     }
   };
@@ -326,8 +329,11 @@ Follow repository instructions. Stop and report when blocked instead of retrying
   try {
     const after = snapshot(repo);
     privateFile(files['after.json'], JSON.stringify(after, null, 2) + '\n');
-    result.integrityFailure ||= after.head !== before.head || after.index !== before.index || !!after.staged;
-  } catch { result.integrityFailure = true; }
+    if (after.head !== before.head) result.integrityReasons.push('head_changed');
+    if (after.index !== before.index) result.integrityReasons.push('index_changed');
+    if (after.staged) result.integrityReasons.push('staged_changes');
+  } catch { result.integrityReasons.push('post_run_evidence_failed'); }
+  result.integrityFailure = result.integrityReasons.length > 0;
   const completed = result.exitCode === 0 && result.sessionId && result.lastTurnReason === 'completed' && turnEnded && finalSeen && finalIndex > lastEndIndex && !eventErrors && !result.protocolError && !result.stopReason && !result.integrityFailure;
   result.outcome = completed ? 'completed' : 'failed';
   if (completed) result.category = null;
@@ -345,6 +351,7 @@ main().catch(error => {
   const result = activeResult || { outcome: 'failed', codexVerified: false };
   result.category = activeResult ? 'runner_error' : 'preflight_or_runner_error';
   if (activeResult) {
+    result.integrityFailure = result.integrityReasons.length > 0;
     try { privateFile(result.summaryPath, JSON.stringify(result, null, 2) + '\n', false); } catch {}
   }
   console.log(JSON.stringify({ ...result, detail: error.safeMessage, advice: 'Check --help and local path, permission, and Git prerequisites. No automatic retry.' }));

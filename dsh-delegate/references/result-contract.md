@@ -30,7 +30,7 @@ The execution deadline remains active until process output closes. After a leade
 | `transport` | DNS, connection, or transport failure. Check host network permissions and connectivity. |
 | `unknown` | No recognized provider cause or incomplete protocol evidence. Read private logs without guessing. |
 | `protocol` | Malformed events or inconsistent session and terminal ordering. Check DSH compatibility. |
-| `integrity` | HEAD or tracked index entries changed, staged changes appeared, or post-run Git evidence failed. Inspect without rollback. |
+| `integrity` | HEAD or tracked index entries changed, staged changes appeared, post-run Git evidence failed, or process-group operations failed. Inspect without rollback. |
 | `timeout`, `output_limit`, `line_limit` | Local execution or output bound stopped the process group. Review partial work. |
 | `stream_drain_timeout` | Output streams remained open after the leader-exit drain bound. Runner-owned stdio was closed. Review partial work and check for surviving processes outside the DSH process group. |
 | `cancelled_sigint`, `cancelled_sigterm` | The caller requested cancellation. Review partial work. |
@@ -38,5 +38,7 @@ The execution deadline remains active until process output closes. After a leade
 | `preflight_or_runner_error` | Invalid local inputs or repository prerequisites. DSH is not automatically retried. |
 
 Error classification is best effort from the terminal turn reason, explicit error events, and bounded stderr. It does not prove account state. An unavailable model may be `unknown`; inspect its private error evidence. A 429 alone is classified as a rate limit, not a spent subscription. A completed response containing error-like prose is not classified as a provider error.
+
+After preflight, `integrityReasons` contains fixed labels: `head_changed`, `index_changed`, `staged_changes`, `post_run_evidence_failed`, `group_probe_failed`, `group_sigterm_failed`, and `group_sigkill_failed`. It is empty when no integrity issue was detected. `integrityFailure` is true when the array is nonempty, and `integrity` takes precedence over a local stop reason. The labels contain no Git paths, error messages, or provider output.
 
 The default run limit is 900 seconds. Combined stdout and stderr storage is capped at 8 MiB, with an accepted line limit of 256 KiB. `--max-log-bytes` accepts 256 bytes through 64 MiB. `--max-tokens` defaults to 8192 per model request, and is not a task-wide token or cost limit. Prompt input is capped at 1 MiB. No retry or session resume occurs.

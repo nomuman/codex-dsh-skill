@@ -530,7 +530,9 @@ for (const [mode, args, expected, bound] of [
 ]) {
   test(`bounds output for ${mode}`, async t => {
     const result = await run(fixture(t), mode, args).done;
-    assert.equal(result.summary.category, expected); assert.equal(result.code, 1);
+    const { category, stopReason, integrityReasons } = result.summary;
+    assert.equal(category, expected, JSON.stringify({ mode, category, stopReason, integrityReasons }));
+    assert.equal(result.code, 1);
     assert.deepEqual(result.summary.integrityReasons, []);
     const directory = dirname(result.summary.summaryPath);
     assert.ok(statSync(join(directory, 'events.jsonl')).size + statSync(join(directory, 'stderr.log')).size <= bound);
