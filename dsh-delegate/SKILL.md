@@ -1,6 +1,6 @@
 ---
 name: dsh-delegate
-description: Delegate a bounded development task from Codex to DeepSeek Harness using OpenCode Go, then independently review the resulting diff and tests. Use when the user requests DSH delegation or an authorized task benefits from a separate coding executor.
+description: Delegate a bounded development task from Codex to DeepSeek Harness using OpenCode's limited-time free DeepSeek model or Go subscription, then independently review the resulting diff and tests. Use when the user requests DSH delegation or an authorized task benefits from a separate coding executor.
 ---
 
 # Delegate development to DSH
@@ -15,7 +15,9 @@ Check the actual checkout and Git status. The runner requires a clean Git root w
 
 Use only the network access and execution permissions provided by the current session. If the host forbids the required access, report the limitation. A separate terminal or background process must not bypass that restriction.
 
-Before execution, read `~/.config/codex-dsh-skill/local-setup.md` if it exists. This optional machine-local note contains paths, not credentials or executable shell code. Prefer explicit paths supplied for the current task, then the caller's `DSH_BIN` and `DSH_HOME`, then the note. Ask only for missing paths. Read [setup.md](references/setup.md) for first use or changed configuration. Verify that both paths are existing absolute paths and pass them explicitly on every invocation. Use the saved credentials in that home, without reading or rewriting credential values. The configured provider is the native `opencode-go`, with `deepseek-v4.1-flash` and high reasoning.
+Before execution, read `~/.config/codex-dsh-skill/local-setup.md` if it exists. This optional machine-local note contains paths and an optional route preference, not credentials or executable shell code. Prefer explicit paths supplied for the current task, then the caller's `DSH_BIN` and `DSH_HOME`, then the note. Ask only for missing paths. Read [setup.md](references/setup.md) for first use or changed configuration. Verify that both paths are existing absolute paths and pass them explicitly on every invocation. Let DSH resolve the selected credential reference from its saved store or environment without reading or rewriting secret values.
+
+Select the route from the current user request, then a stored route preference. If neither establishes a choice, ask once before invoking DSH. A free request always selects `opencode-free`. Pass `--route` explicitly on every new invocation. The CLI retains `opencode-go` as its default for existing callers. An unavailable free credential or model ends the run; never switch to Go automatically. The free offering is limited-time, with no unlimited-use or future-price guarantee.
 
 ## Run once
 
@@ -26,14 +28,17 @@ DSH_BIN="/configured/dsh" DSH_HOME="/configured/state" \
   node "<skill-directory>/scripts/run.mjs" \
   --repo "/clean/worktree" \
   --task-file "/private/task.txt" \
+  --route opencode-free \
   --timeout-seconds 900
 ```
+
+Use `--route opencode-go` when Go is selected. See the setup table for each route's credential reference.
 
 The runner sends the task through stdin and writes private artifacts outside the repository and DSH home. It invokes DSH once, with provider retries disabled. It does not resume sessions or automatically reassign a failed task. Time, output, and per-request token limits are operational limits, not monetary caps. DSH can make multiple model requests during one turn.
 
 Keep the execution in progress until the runner exits. Use the returned summary path to read the result. If execution times out or is cancelled, inspect any partial work before deciding the next action. Never infer failure means no files changed.
 
-For authentication, quota, rate, transport, protocol, integrity, or `max_tokens` failures, read [result-contract.md](references/result-contract.md). A model output limit does not establish task completion. Diagnose the recorded cause and inspect partial work before any new model request. Report an unknown cause as unknown. Host communication restrictions and an expired provider credential are separate failures.
+For authentication, quota, rate, transport, unavailable-model, protocol, integrity, or `max_tokens` failures, read [result-contract.md](references/result-contract.md). A model output limit does not establish task completion. Diagnose the recorded cause and inspect partial work before any new model request. Report an unknown cause as unknown. Host communication restrictions and an expired provider credential are separate failures.
 
 ## Verify independently
 

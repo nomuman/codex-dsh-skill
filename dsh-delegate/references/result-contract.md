@@ -2,6 +2,8 @@
 
 The runner prints one JSON summary to stdout. Stderr contains fixed progress labels and counters. Raw provider stderr and the final answer remain in private files. The exit code is 0 for a completed DSH invocation and 1 for every failure or incomplete outcome. `codexVerified` is always false. Independent Codex review happens after the runner returns.
 
+After preflight, summaries include `route`, `provider`, and `model` from the selected fixed route. These identify the requested configuration, not successful authentication, account eligibility, or billing. Invalid routes and duplicate options fail before run artifacts or DSH invocation. The CLI defaults to `opencode-go`; use `--route opencode-free` for the free model. A failed free run never falls back to Go.
+
 Each run has a unique directory with mode 0700. Its `evidence/` directory also has mode 0700, and its files have mode 0600:
 
 | File | Contents |
@@ -35,6 +37,6 @@ The execution deadline remains active until process output closes. After a leade
 | `spawn_error`, `runner_io_error`, `runner_error` | Process startup or local runner operation failed. Inspect the local environment. |
 | `preflight_or_runner_error` | Invalid local inputs or repository prerequisites. DSH is not automatically retried. |
 
-Error classification is best effort from the terminal turn reason, explicit error events, and bounded stderr. It does not prove account state. A 429 alone is classified as a rate limit, not a spent subscription. A completed response containing error-like prose is not classified as a provider error.
+Error classification is best effort from the terminal turn reason, explicit error events, and bounded stderr. It does not prove account state. An unavailable model may be `unknown`; inspect its private error evidence. A 429 alone is classified as a rate limit, not a spent subscription. A completed response containing error-like prose is not classified as a provider error.
 
 The default run limit is 900 seconds. Combined stdout and stderr storage is capped at 8 MiB, with an accepted line limit of 256 KiB. `--max-log-bytes` accepts 256 bytes through 64 MiB. `--max-tokens` defaults to 8192 per model request, and is not a task-wide token or cost limit. Prompt input is capped at 1 MiB. No retry or session resume occurs.
