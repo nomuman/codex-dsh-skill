@@ -150,6 +150,17 @@ Follow repository instructions. Stop and report when blocked instead of retrying
   });
   console.error('dsh-delegate: started');
   let stopWait;
+  let drainTimer;
+  let finishProcess;
+  const processFinished = new Promise(done => { finishProcess = done; });
+  const boundDrain = () => {
+    drainTimer ||= setTimeout(() => {
+      result.stopReason ||= 'stream_drain_timeout';
+      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+      child.unref();
+      finishProcess();
+    }, 2000);
+  };
   const killGroup = signal => {
     if (!child.pid) return;
     try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') result.integrityFailure = true; }
@@ -171,6 +182,7 @@ Follow repository instructions. Stop and report when blocked instead of retrying
     if (result.stopReason) return;
     result.stopReason = reason;
     stopWait ||= terminateGroup();
+    boundDrain();
   };
   const cancel = signal => stop(signal === 'SIGINT' ? 'cancelled_sigint' : 'cancelled_sigterm');
   const onInt = () => cancel('SIGINT');
@@ -228,11 +240,17 @@ Follow repository instructions. Stop and report when blocked instead of retrying
   child.stdin.on('error', () => {});
   child.stdin.end(prompt);
   child.on('error', () => { result.category = 'spawn_error'; });
-  child.once('exit', () => {
-    clearTimeout(timer);
+  child.once('exit', (code, signal) => {
+    result.exitCode = code; result.signal = signal;
     if (!stopWait && groupExists()) stopWait = terminateGroup();
+    boundDrain();
   });
-  await new Promise(done => child.on('close', (code, signal) => { result.exitCode = code; result.signal = signal; done(); }));
+  child.once('close', (code, signal) => {
+    result.exitCode = code; result.signal = signal;
+    clearTimeout(drainTimer);
+    finishProcess();
+  });
+  await processFinished;
   clearTimeout(timer);
   line += decoder.end();
   if (line) event(line);
@@ -252,6 +270,7 @@ Follow repository instructions. Stop and report when blocked instead of retrying
   else if (result.integrityFailure) result.category = 'integrity';
   else if (result.stopReason) result.category = result.stopReason;
   else if (result.protocolError) result.category = 'protocol';
+  else if (result.lastTurnReason === 'max-tokens') result.category = 'max_tokens';
   else if (result.category !== 'spawn_error') result.category = classify(eventErrors + '\n' + stderrTail);
   save();
   console.log(JSON.stringify(result));

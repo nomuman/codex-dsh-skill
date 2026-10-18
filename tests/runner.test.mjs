@@ -35,6 +35,15 @@ if (mode === 'hang' || mode === 'orphan') {
 } else if (mode === 'invalid') {
   process.stdout.write('private invalid JSON\\n');
   setInterval(() => {}, 1000);
+} else if (mode.startsWith('escaped-')) {
+  const child = spawn(process.execPath, ['-e', "require('node:fs').writeFileSync(process.argv[1],String(process.pid)); process.send('ready'); process.disconnect(); setInterval(()=>{},1000)", join(process.env.DSH_HOME, 'child.pid')], { detached: true, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+  await new Promise(resolve => child.once('message', resolve));
+  child.unref();
+  session();
+  writeFileSync('result.txt', 'partial work');
+  writeFileSync(join(process.env.DSH_HOME, 'ready'), 'yes');
+  if (mode === 'escaped-success') { end('completed'); final(); }
+  else setInterval(() => {}, 1000);
 } else if (mode.startsWith('success-orphan')) {
   const child = spawn(process.execPath, ['-e', "const fs=require('node:fs'); process.on('SIGTERM',()=>fs.writeFileSync('cleanup.txt','TERM received')); fs.writeFileSync(process.argv[1],String(process.pid)); setTimeout(()=>fs.writeFileSync('result.txt','late mutation'),2300); process.send('ready'); process.disconnect(); setInterval(()=>{},1000)", join(process.env.DSH_HOME, 'child.pid')], { stdio: ['ignore', mode.endsWith('-pipes') ? 'inherit' : 'ignore', mode.endsWith('-pipes') ? 'inherit' : 'ignore', 'ipc'] });
   await new Promise(resolve => child.once('message', resolve));
@@ -104,10 +113,18 @@ function run(f, mode = 'success', extra = [], env = {}) {
   });
   const done = new Promise((resolve, reject) => {
     let stdout = ''; let stderr = '';
+    const supervisor = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('Runner exceeded the test supervisor deadline'));
+    }, 12000);
     child.stdout.on('data', value => { stdout += value; });
     child.stderr.on('data', value => { stderr += value; });
-    child.on('error', reject);
-    child.on('close', code => resolve({ code, stdout, stderr, summary: JSON.parse(stdout.trim()) }));
+    child.on('error', error => { clearTimeout(supervisor); reject(error); });
+    child.on('close', code => {
+      clearTimeout(supervisor);
+      try { resolve({ code, stdout, stderr, summary: JSON.parse(stdout.trim()) }); }
+      catch (error) { reject(error); }
+    });
   });
   return { child, done };
 }
@@ -193,6 +210,7 @@ test('preserves max-tokens turn reason without reporting completion', async t =>
   const result = await run(fixture(t), 'max-tokens').done;
   assert.equal(result.code, 1); assert.equal(result.summary.outcome, 'failed');
   assert.equal(result.summary.lastTurnReason, 'max-tokens');
+  assert.equal(result.summary.category, 'max_tokens');
 });
 
 test('ordinary Git status and allowed edits preserve semantic index integrity', async t => {
@@ -303,6 +321,38 @@ for (const mode of ['success-orphan', 'success-orphan-pipes']) {
     assert.ok(after.status.includes('cleanup.txt'), 'Snapshot must include cleanup activity before completion');
     await new Promise(resolve => setTimeout(resolve, 1000));
     assert.equal(readFileSync(join(f.repo, 'result.txt'), 'utf8'), 'original', 'No delayed mutation after the summary');
+  });
+}
+
+for (const mode of ['escaped-success', 'escaped-timeout', 'escaped-cancel']) {
+  test(`bounds inherited streams and saves partial evidence for ${mode}`, async t => {
+    const f = fixture(t);
+    const invocation = run(f, mode, ['--timeout-seconds', mode === 'escaped-timeout' ? '1' : '30']);
+    try {
+      await waitFor(join(f.home, 'ready'));
+      if (mode === 'escaped-cancel') invocation.child.kill('SIGTERM');
+      const result = await invocation.done;
+      const expected = { 'escaped-success': 'stream_drain_timeout', 'escaped-timeout': 'timeout', 'escaped-cancel': 'cancelled_sigterm' }[mode];
+      assert.equal(result.code, 1);
+      assert.equal(result.summary.outcome, 'failed');
+      assert.equal(result.summary.category, expected);
+      assert.equal(result.summary.stopReason, expected);
+      const evidence = dirname(result.summary.summaryPath);
+      assert.equal(JSON.parse(readFileSync(result.summary.summaryPath)).category, expected);
+      assert.ok(JSON.parse(readFileSync(join(evidence, 'after.json'))).status.includes('result.txt'));
+      assert.match(readFileSync(join(evidence, 'events.jsonl'), 'utf8'), /test-session/);
+      assert.equal(readFileSync(join(f.repo, 'result.txt'), 'utf8'), 'partial work');
+      const pid = Number(readFileSync(join(f.home, 'child.pid'), 'utf8'));
+      assert.doesNotThrow(() => process.kill(pid, 0), 'The runner does not own an escaped process group');
+    } finally {
+      const pidPath = join(f.home, 'child.pid');
+      if (existsSync(pidPath)) {
+        try { process.kill(Number(readFileSync(pidPath, 'utf8')), 'SIGKILL'); }
+        catch (error) { if (error.code !== 'ESRCH') throw error; }
+      }
+      if (invocation.child.exitCode === null && invocation.child.signalCode === null) invocation.child.kill('SIGKILL');
+      await invocation.done.catch(() => {});
+    }
   });
 }
 
