@@ -1,0 +1,4 @@
+interface:
+  display_name: "DSH Delegate"
+  short_description: "Delegate to DSH, then review actual changes and test results"
+  default_prompt: "Use $dsh-delegate to perform this development task and independently verify the diff and tests."
