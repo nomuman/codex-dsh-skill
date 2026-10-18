@@ -1,0 +1,13 @@
+.DS_Store
+.audit/
+.local/
+node_modules/
+state/
+.dsh/
+.env
+.env.*
+!.env.example
+*.jsonl
+*.log
+.credentials*
+__pycache__/
