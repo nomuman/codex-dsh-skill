@@ -229,7 +229,7 @@ for (const [name, setup, route, env = {}] of [
   ['empty project shadows state Go reference', f => { writeFileSync(join(f.repo, '.env'), 'OPENCODE_GO_API_KEY=\n'); writeFileSync(join(f.home, '.env'), 'OPENCODE_GO_API_KEY=dummy\n'); }, 'opencode-free'],
   ['process Go reference wins over empty project', f => writeFileSync(join(f.repo, '.env'), 'OPENCODE_GO_API_KEY=\n'), 'opencode-go', { OPENCODE_GO_API_KEY: 'dummy' }],
   ['generic free process reference', () => {}, 'opencode-free', { OPENCODE_API_KEY: 'dummy' }],
-  ['provider login record', f => writeFileSync(join(f.home, '.credentials.yaml'), JSON.stringify({ version: 1, refs: {}, records: { opencode: 'dummy' } }), { mode: 0o600 }), 'opencode-free'],
+  ['provider login record', f => writeFileSync(join(f.home, '.credentials.yaml'), JSON.stringify({ version: 1, refs: {}, records: { 'llm-pi-ai/opencode-go': { kind: 'api-key', key: 'dummy' } } }), { mode: 0o600 }), 'opencode-free'],
 ]) {
   test(`auto selects ${route} with ${name}`, async t => {
     const f = fixture(t);
