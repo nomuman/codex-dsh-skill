@@ -18,14 +18,14 @@ $skill-installer nomuman/codex-dsh-skill の main ブランチから dsh-delegat
 
 DSH 実行ファイルと既存の state ディレクトリの絶対パスを Codex に伝えます。毎回の入力を省く場合は、リポジトリ・Skill の外にある `~/.config/codex-dsh-skill/local-setup.md` にパスや経路の希望を保存できます。これは Codex が読む任意のローカル設定で、runner が読み込む設定ファイルではありません。詳しくは [ローカル設定](dsh-delegate/references/setup.md) を参照してください。別ターミナルで `export` しても、起動済みの Codex デスクトップには反映されません。
 
-Codex では `$dsh-delegate` と作業内容、対象リポジトリ、完了条件、無料または Go の希望を伝えます。今回の指定を保存済みの経路設定より優先し、どちらもなければ一度確認します。通常の Skill 自動選択にも対応します。元の作業場所に未コミット変更がある場合は、Codex が別のクリーンな worktree を用意して保護します。
+Codex では `$dsh-delegate` と作業内容、対象リポジトリ、完了条件を伝えます。無料または Go を指定した場合は、その指定を保存済みの経路設定より優先します。どちらもなければ runner が自動選択します。通常の Skill 自動選択にも対応します。元の作業場所に未コミット変更がある場合は、Codex が別のクリーンな worktree を用意して保護します。
 
-| runner の指定 | 使用するモデル | 必要な認証参照 |
+| 選択された経路 | 使用するモデル | 必要な認証参照 |
 | --- | --- | --- |
 | `--route opencode-free` | `opencode` / `deepseek-v4.1-flash-free` | `OPENCODE_API_KEY` |
 | `--route opencode-go` | `opencode-go` / `deepseek-v4.1-flash` | `OPENCODE_GO_API_KEY` と Go 契約 |
 
-DSH が選択した認証参照を保存済みの認証ストアか環境変数から解決できる必要があります。プロバイダーへのログイン情報だけでは、この参照を満たさない場合があります。Skill は新しい呼び出しで経路を明示します。既存 CLI 呼び出しとの互換性のため、省略時は Go です。無料経路が失敗しても Go へ自動変更しません。
+DSH が選択した認証参照を保存済みの認証ストアか環境変数から解決できる必要があります。プロバイダーへのログイン情報だけでは、この参照を満たさない場合があります。runner の `--route` 省略時は `auto` です。Go 専用参照 `OPENCODE_GO_API_KEY` が保存済みストアまたは有効な環境設定にあれば Go、なければ無料経路を選びます。これは登録設定の判定であり、有効な契約や残り利用枠の確認ではありません。認証や利用枠のエラーが出ても経路を切り替えません。
 
 [無料モデルは公式に期間限定と記載されています](https://opencode.ai/v2/docs/console/models/)。無制限利用や将来の無料継続を保証するものではありません。認証と設定の詳細は [ローカル設定](dsh-delegate/references/setup.md) を参照してください。
 
@@ -60,7 +60,7 @@ Go での実際の委譲は macOS、DSH `0.2.1-rc.2`、この runner のネイ�
 npm test
 ```
 
-外部通信、API キー、DSH のインストールが不要な subprocess テストです。経路選択・無料失敗時の一度だけの起動・成功・偽の完了・エラー分類・Git 状態保護・権限・出力制限・タイムアウト・キャンセルと子プロセス停止を検証します。
+外部通信、API キー、DSH のインストールが不要な subprocess テストです。自動選択・明示指定・失敗時の一度だけの起動・成功・偽の完了・エラー分類・Git 状態保護・権限・出力制限・タイムアウト・キャンセルと子プロセス停止を検証します。
 
 [DSH 公式](https://github.com/deepseek-ai/deepseek-harness) と [OpenCode Go 公式](https://opencode.ai/v2/docs/console/go/) の仕様・条件は更新されるため、利用時点で確認してください。DeepSeek 直 API とのチェックポイント一致やデータ保持条件をこのリポジトリでは保証しません。
 
