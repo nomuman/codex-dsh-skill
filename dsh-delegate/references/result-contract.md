@@ -2,7 +2,7 @@
 
 The runner prints one JSON summary to stdout. Stderr contains fixed progress labels and counters. Raw provider stderr and the final answer remain in private files. The exit code is 0 for a completed DSH invocation and 1 for every failure or incomplete outcome. `codexVerified` is always false. Independent Codex review happens after the runner returns.
 
-After preflight, summaries include `route`, `provider`, and `model` from the selected fixed route. These identify the requested configuration, not successful authentication, account eligibility, or billing. Invalid routes and duplicate options fail before run artifacts or DSH invocation. The CLI defaults to `opencode-go`; use `--route opencode-free` for the free model. A failed free run never falls back to Go.
+After preflight, summaries include `requestedRoute`, `route`, `provider`, and `model`. `requestedRoute` is `auto` when omitted; `route` is the resolved fixed route. These identify the selected configuration, not successful authentication, account eligibility, or billing. Invalid routes, duplicate options, and unsafe or unreadable auto-selection metadata fail before run artifacts or DSH invocation. The CLI defaults to `auto`; explicit Go and free routes bypass metadata selection. A failed run never changes routes.
 
 Each run has a unique directory with mode 0700. Its `evidence/` directory also has mode 0700, and its files have mode 0600:
 

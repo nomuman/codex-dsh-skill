@@ -7,6 +7,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const runner = resolve(dirname(fileURLToPath(import.meta.url)), '../dsh-delegate/scripts/run.mjs');
+const dummyStore = JSON.stringify({ version: 1, refs: { OPENCODE_GO_API_KEY: 'dummy-reference' } });
+const parser = `export function parseCredentialsDocument(text) {
+  const document = JSON.parse(text);
+  if (document.version !== 1 || !document.refs || typeof document.refs !== 'object') throw new Error('SECRET_MARKER invalid store');
+  return { refs: new Map(Object.entries(document.refs)) };
+}`;
 const fake = `#!${process.execPath}
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
@@ -101,16 +107,25 @@ function fixture(t) {
   for (const path of [repo, home, artifacts]) mkdirSync(path, { mode: 0o700 });
   git(repo, 'init', '-q');
   writeFileSync(join(repo, 'result.txt'), 'original');
+  writeFileSync(join(repo, '.gitignore'), '.env\n');
   git(repo, 'add', 'result.txt');
+  git(repo, 'add', '.gitignore');
   git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture');
   const bin = join(root, 'fake-dsh.mjs'); writeFileSync(bin, fake); chmodSync(bin, 0o700);
+  const packagePath = join(root, 'node_modules', '@deepseek-ai', 'dsh-credentials-local');
+  mkdirSync(packagePath, { recursive: true });
+  writeFileSync(join(packagePath, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-credentials-local', type: 'module', exports: './index.mjs' }));
+  writeFileSync(join(packagePath, 'index.mjs'), parser);
   const task = join(root, 'task.txt'); writeFileSync(task, 'Change result.txt. $(touch INJECTED) ; echo literal');
-  return { root, repo, home, artifacts, bin, task };
+  return { root, repo, home, artifacts, bin, task, packagePath };
 }
 function run(f, mode = 'success', extra = [], env = {}) {
   const bounds = extra.includes('--timeout-seconds') ? [] : ['--timeout-seconds', '6'];
+  const processEnv = { ...process.env };
+  delete processEnv.OPENCODE_GO_API_KEY;
+  delete processEnv.OPENCODE_API_KEY;
   const child = spawn(process.execPath, [runner, '--repo', f.repo, '--task-file', f.task, '--artifacts-dir', f.artifacts, ...bounds, ...extra], {
-    env: { ...process.env, DSH_BIN: f.bin, DSH_HOME: f.home, FAKE_MODE: mode, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...processEnv, DSH_BIN: f.bin, DSH_HOME: f.home, FAKE_MODE: mode, ...env }, stdio: ['ignore', 'pipe', 'pipe'],
   });
   const done = new Promise((resolve, reject) => {
     let stdout = ''; let stderr = '';
@@ -163,11 +178,11 @@ test('prints the same help and exits 0 for -h and --help without configuration',
 
 test('one process receives stdin literally, preserves credentials, and produces private review evidence', async t => {
   const f = fixture(t); const credentials = join(f.home, '.credentials.yaml');
-  writeFileSync(credentials, 'test credential fixture', { mode: 0o600 });
+  writeFileSync(credentials, dummyStore, { mode: 0o600 });
   const { code, stdout, stderr, summary } = await run(f).done;
   assert.equal(code, 0); assert.equal(summary.outcome, 'completed'); assert.equal(summary.codexVerified, false);
   assert.equal(summary.category, null); assert.equal(summary.sessionId, 'test-session');
-  assert.equal(readFileSync(credentials, 'utf8'), 'test credential fixture');
+  assert.equal(readFileSync(credentials, 'utf8'), dummyStore);
   assert.equal(readFileSync(join(f.repo, 'result.txt'), 'utf8'), 'changed');
   assert.equal(existsSync(join(f.repo, 'INJECTED')), false);
   const invocation = JSON.parse(readFileSync(join(f.home, 'invocation.json')));
@@ -184,20 +199,104 @@ test('one process receives stdin literally, preserves credentials, and produces 
   assert.match(patch, /opencode-go:/); assert.match(patch, /maxRetries: 0/); assert.match(patch, /maxTokens: 8192/);
 });
 
-test('default route and explicit Go produce the same configuration', async t => {
-  const legacy = await run(fixture(t)).done;
+test('configured Go and explicit Go produce the same configuration', async t => {
+  const autoFixture = fixture(t);
+  writeFileSync(join(autoFixture.home, '.credentials.yaml'), dummyStore, { mode: 0o600 });
+  const automatic = await run(autoFixture).done;
   const explicit = await run(fixture(t), 'success', ['--route', 'opencode-go']).done;
-  for (const result of [legacy, explicit]) {
+  for (const result of [automatic, explicit]) {
     assert.equal(result.code, 0);
     assert.equal(result.summary.route, 'opencode-go');
     assert.equal(result.summary.provider, 'opencode-go');
     assert.equal(result.summary.model, 'deepseek-v4.1-flash');
   }
   const configuration = result => readFileSync(join(dirname(result.summary.summaryPath), 'patch.yml'), 'utf8');
-  assert.equal(configuration(legacy), configuration(explicit));
-  assert.match(configuration(legacy), /apiKeyEnv: OPENCODE_GO_API_KEY\n/);
-  assert.match(configuration(legacy), /baseURL: https:\/\/opencode.ai\/inference\/go\/openai\/v1\n/);
+  assert.equal(automatic.summary.requestedRoute, 'auto');
+  assert.equal(explicit.summary.requestedRoute, 'opencode-go');
+  assert.equal(configuration(automatic), configuration(explicit));
+  assert.match(configuration(automatic), /apiKeyEnv: OPENCODE_GO_API_KEY\n/);
+  assert.match(configuration(automatic), /baseURL: https:\/\/opencode.ai\/inference\/go\/openai\/v1\n/);
 });
+
+for (const [name, setup, route, env = {}] of [
+  ['no Go reference', () => {}, 'opencode-free'],
+  ['only a free reference', f => writeFileSync(join(f.home, '.credentials.yaml'), JSON.stringify({ version: 1, refs: { OPENCODE_API_KEY: 'free' } }), { mode: 0o600 }), 'opencode-free'],
+  ['both saved references', f => writeFileSync(join(f.home, '.credentials.yaml'), JSON.stringify({ version: 1, refs: { OPENCODE_API_KEY: 'free', OPENCODE_GO_API_KEY: 'go' } }), { mode: 0o600 }), 'opencode-go'],
+  ['process Go reference', () => {}, 'opencode-go', { OPENCODE_GO_API_KEY: 'dummy' }],
+  ['project dotenv Go reference', f => writeFileSync(join(f.repo, '.env'), 'OPENCODE_GO_API_KEY=dummy\n'), 'opencode-go'],
+  ['state dotenv Go reference', f => writeFileSync(join(f.home, '.env'), 'OPENCODE_GO_API_KEY=dummy\n'), 'opencode-go'],
+  ['empty process and project Go reference', f => writeFileSync(join(f.repo, '.env'), 'OPENCODE_GO_API_KEY=dummy\n'), 'opencode-go', { OPENCODE_GO_API_KEY: '' }],
+  ['empty project shadows state Go reference', f => { writeFileSync(join(f.repo, '.env'), 'OPENCODE_GO_API_KEY=\n'); writeFileSync(join(f.home, '.env'), 'OPENCODE_GO_API_KEY=dummy\n'); }, 'opencode-free'],
+  ['process Go reference wins over empty project', f => writeFileSync(join(f.repo, '.env'), 'OPENCODE_GO_API_KEY=\n'), 'opencode-go', { OPENCODE_GO_API_KEY: 'dummy' }],
+  ['generic free process reference', () => {}, 'opencode-free', { OPENCODE_API_KEY: 'dummy' }],
+  ['provider login record', f => writeFileSync(join(f.home, '.credentials.yaml'), JSON.stringify({ version: 1, refs: {}, records: { 'llm-pi-ai/opencode-go': { kind: 'api-key', key: 'dummy' } } }), { mode: 0o600 }), 'opencode-free'],
+]) {
+  test(`auto selects ${route} with ${name}`, async t => {
+    const f = fixture(t);
+    setup(f);
+    const store = join(f.home, '.credentials.yaml');
+    const original = existsSync(store) ? readFileSync(store, 'utf8') : null;
+    const result = await run(f, 'success', [], env).done;
+    assert.equal(result.code, 0);
+    assert.equal(result.summary.requestedRoute, 'auto');
+    assert.equal(result.summary.route, route);
+    assert.equal(readFileSync(join(f.home, 'invocations.log'), 'utf8'), 'invoked\n');
+    assert.equal(existsSync(store) ? readFileSync(store, 'utf8') : null, original);
+  });
+}
+
+for (const [name, setup] of [
+  ['malformed store', f => writeFileSync(join(f.home, '.credentials.yaml'), 'SECRET_MARKER: [', { mode: 0o600 })],
+  ['legacy store', f => writeFileSync(join(f.home, '.credentials.yaml'), JSON.stringify({ refs: { OPENCODE_GO_API_KEY: 'SECRET_MARKER' } }), { mode: 0o600 })],
+  ['unsupported store version', f => writeFileSync(join(f.home, '.credentials.yaml'), JSON.stringify({ version: 2, refs: {} }), { mode: 0o600 })],
+  ['group-readable store', f => writeFileSync(join(f.home, '.credentials.yaml'), dummyStore, { mode: 0o640 })],
+  ['unreadable store', f => writeFileSync(join(f.home, '.credentials.yaml'), dummyStore, { mode: 0o000 })],
+  ['store directory', f => mkdirSync(join(f.home, '.credentials.yaml'))],
+  ['symlink store', f => { writeFileSync(join(f.root, 'credential-target'), dummyStore, { mode: 0o600 }); symlinkSync(join(f.root, 'credential-target'), join(f.home, '.credentials.yaml')); }],
+  ['missing parser', f => rmSync(join(f.packagePath, 'index.mjs'))],
+  ['incompatible parser export', f => writeFileSync(join(f.packagePath, 'index.mjs'), 'export const incompatible = true;')],
+  ['project dotenv directory', f => mkdirSync(join(f.repo, '.env'))],
+]) {
+  test(`auto stops before artifacts or DSH for ${name}`, async t => {
+    const f = fixture(t);
+    setup(f);
+    const store = join(f.home, '.credentials.yaml');
+    const original = name !== 'unreadable store' && existsSync(store) && statSync(store).isFile() ? readFileSync(store, 'utf8') : null;
+    const result = await run(f).done;
+    assert.equal(result.code, 1);
+    assert.equal(result.summary.category, 'preflight_or_runner_error');
+    assert.equal(existsSync(join(f.home, 'invocations.log')), false);
+    assert.deepEqual(readdirSync(f.artifacts), []);
+    assert.doesNotMatch(result.stdout + result.stderr, /SECRET_MARKER|dummy-reference/);
+    if (original !== null) assert.equal(readFileSync(store, 'utf8'), original);
+  });
+}
+
+test('explicit routes bypass invalid metadata and missing parser', async t => {
+  for (const route of ['opencode-go', 'opencode-free']) {
+    const f = fixture(t);
+    writeFileSync(join(f.home, '.credentials.yaml'), 'SECRET_MARKER invalid', { mode: 0o600 });
+    rmSync(join(f.packagePath, 'index.mjs'));
+    const result = await run(f, 'success', ['--route', route]).done;
+    assert.equal(result.code, 0);
+    assert.equal(result.summary.requestedRoute, route);
+    assert.equal(result.summary.route, route);
+    assert.equal(readFileSync(join(f.home, '.credentials.yaml'), 'utf8'), 'SECRET_MARKER invalid');
+  }
+});
+
+for (const [route, credential] of [['opencode-go', dummyStore], ['opencode-free', null]]) {
+  test(`auto ${route} authentication failure stops after one invocation`, async t => {
+    const f = fixture(t);
+    if (credential) writeFileSync(join(f.home, '.credentials.yaml'), credential, { mode: 0o600 });
+    const result = await run(f, 'code:AUTH').done;
+    assert.equal(result.code, 1);
+    assert.equal(result.summary.category, 'authentication');
+    assert.equal(result.summary.route, route);
+    assert.equal(readFileSync(join(f.home, 'invocations.log'), 'utf8'), 'invoked\n');
+    assert.equal(readdirSync(f.artifacts).length, 1);
+  });
+}
 
 test('free route selects only the native free model and preserves execution bounds', async t => {
   const f = fixture(t);
