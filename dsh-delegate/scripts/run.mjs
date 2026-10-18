@@ -2,13 +2,16 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { constants, accessSync, closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { isAbsolute, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
+import { parseEnv } from 'node:util';
+import { pathToFileURL } from 'node:url';
 
 const usage = `Usage: DSH_BIN=/absolute/dsh DSH_HOME=/absolute/existing-state node run.mjs
   --repo /absolute/clean-git-root --task-file /absolute/private/task.txt
-  [--route opencode-go|opencode-free] (default: opencode-go)
+  [--route auto|opencode-go|opencode-free] (default: auto)
   [--timeout-seconds 900] [--max-log-bytes 8388608] [--max-tokens 8192]
   [--artifacts-dir /absolute/existing-parent]
   [-h | --help]
@@ -85,9 +88,53 @@ function patch(route, maxTokens) {
 ${disabled.map(id => `- id: ${id}\n  disabled: true\n`).join('')}`;
 }
 
+async function resolveRoute(requested, bin, home, repo, env) {
+  if (requested !== 'auto') return requested;
+  try {
+    const modulePath = createRequire(bin).resolve('@deepseek-ai/dsh-credentials-local');
+    const { parseCredentialsDocument } = await import(pathToFileURL(modulePath).href);
+    if (typeof parseCredentialsDocument !== 'function') throw new Error('Incompatible credential parser');
+
+    const credentialsPath = join(home, '.credentials.yaml');
+    let credentials;
+    try {
+      const fd = openSync(credentialsPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const metadata = fstatSync(fd);
+        if (!metadata.isFile() || metadata.uid !== process.getuid() || (metadata.mode & 0o077) !== 0) throw new Error('Unsafe credential file');
+        credentials = readFileSync(fd, 'utf8');
+      } finally { closeSync(fd); }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    if (credentials !== undefined) {
+      const document = parseCredentialsDocument(credentials, credentialsPath);
+      if (!(document?.refs instanceof Map)) throw new Error('Incompatible credential document');
+      if (document.refs.has('OPENCODE_GO_API_KEY')) return 'opencode-go';
+    }
+
+    if (env.OPENCODE_GO_API_KEY) return 'opencode-go';
+    const dotenv = path => {
+      let fd;
+      try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+      catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+      try {
+        if (!fstatSync(fd).isFile()) throw new Error('Invalid dotenv file');
+        return parseEnv(readFileSync(fd, 'utf8'));
+      } finally { closeSync(fd); }
+    };
+    const project = dotenv(join(repo, '.env'));
+    const state = dotenv(join(home, '.env'));
+    const value = Object.hasOwn(project, 'OPENCODE_GO_API_KEY') ? project.OPENCODE_GO_API_KEY : state.OPENCODE_GO_API_KEY;
+    return value ? 'opencode-go' : 'opencode-free';
+  } catch {
+    reject('Automatic route selection could not read compatible local DSH credential metadata');
+  }
+}
+
 async function main() {
   if (process.argv.includes('--help') || process.argv.includes('-h')) { console.log(usage); return; }
-  const options = { '--route': 'opencode-go', '--timeout-seconds': '900', '--max-log-bytes': '8388608', '--max-tokens': '8192' };
+  const options = { '--route': 'auto', '--timeout-seconds': '900', '--max-log-bytes': '8388608', '--max-tokens': '8192' };
   const allowed = new Set(['--repo', '--task-file', '--artifacts-dir', ...Object.keys(options)]);
   const supplied = new Set();
   const args = process.argv.slice(2);
@@ -95,8 +142,7 @@ async function main() {
     if (!allowed.has(args[i]) || supplied.has(args[i]) || !args[i + 1]) reject('Invalid or duplicate option; use --help');
     supplied.add(args[i]); options[args[i]] = args[i + 1];
   }
-  if (!Object.hasOwn(routes, options['--route'])) reject('--route must be opencode-go or opencode-free');
-  const route = routes[options['--route']];
+  if (options['--route'] !== 'auto' && !Object.hasOwn(routes, options['--route'])) reject('--route must be auto, opencode-go, or opencode-free');
   const positive = key => {
     const value = Number(options[key]);
     if (!Number.isSafeInteger(value) || value <= 0 || value > 2147483) reject(`${key} must be an integer between 1 and 2147483`);
@@ -128,12 +174,14 @@ async function main() {
   } finally { closeSync(taskFd); }
   const parent = existing(options['--artifacts-dir'] || realpathSync(tmpdir()), '--artifacts-dir');
   if (!statSync(parent).isDirectory() || inside(parent, repo) || inside(parent, home)) reject('Artifact parent must be a directory outside the repository and DSH_HOME');
+  const selectedRoute = await resolveRoute(options['--route'], bin, home, repo, process.env);
+  const route = routes[selectedRoute];
   const runDir = mkdtempSync(join(parent, 'dsh-delegate-'));
   mkdirSync(join(runDir, 'evidence'), { mode: 0o700 });
   const files = Object.fromEntries(['summary.json', 'before.json', 'after.json', 'prompt.txt', 'patch.yml', 'events.jsonl', 'stderr.log', 'answer.txt'].map(name => [name, join(runDir, 'evidence', name)]));
   const result = {
     outcome: 'incomplete', category: 'unknown', codexVerified: false,
-    route: options['--route'], provider: route.provider, model: route.model,
+    requestedRoute: options['--route'], route: selectedRoute, provider: route.provider, model: route.model,
     runDir, summaryPath: files['summary.json'], exitCode: null, signal: null,
     sessionId: null, lastTurnReason: null, stopReason: null, outputBytes: 0,
     protocolError: false, integrityFailure: false,
